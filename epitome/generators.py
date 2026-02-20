@@ -294,7 +294,7 @@ def load_data(data,
     return g
 
 
-def generator_to_tf_dataset(g, batch_size, shuffle_size, prefetch_size):
+def generator_to_tf_dataset(g, batch_size, shuffle_size, prefetch_size, num_workers=0):
     """
     Creates a PyTorch DataLoader from a data generator.
 
@@ -302,6 +302,7 @@ def generator_to_tf_dataset(g, batch_size, shuffle_size, prefetch_size):
     :param batch_size: number of elements to combine into a single batch
     :param shuffle_size: unused (kept for API compatibility)
     :param prefetch_size: unused (kept for API compatibility)
+    :param num_workers: number of worker processes for data loading (default 0 = main process)
 
     :returns: tuple of (input_shapes, output_shape, DataLoader)
     """
@@ -312,6 +313,11 @@ def generator_to_tf_dataset(g, batch_size, shuffle_size, prefetch_size):
     labels = f[-2]
 
     dataset = _EpitomeIterableDataset(g)
-    loader = DataLoader(dataset, batch_size=batch_size)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        persistent_workers=num_workers > 0,
+    )
 
     return [feat.shape[0] for feat in features], labels.shape, loader

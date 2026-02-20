@@ -115,7 +115,8 @@ class PeakModel():
                  radii=[1,3,10,30],
                  checkpoint = None,
                  max_valid_batches = None,
-                 device = None):
+                 device = None,
+                 num_workers = 0):
         '''
         Initializes Peak Model
 
@@ -135,6 +136,8 @@ class PeakModel():
         :param device: torch device to run on (e.g. "cpu", "cuda", "mps"). Defaults to MPS if
             available, CUDA if available, otherwise CPU.
         :type device: str or torch.device or None
+        :param int num_workers: number of DataLoader worker processes for background data loading.
+            0 (default) loads in the main process. 2-4 typically saturates the GPU pipeline.
         '''
 
         # resolve device
@@ -146,6 +149,7 @@ class PeakModel():
             else:
                 device = torch.device("cpu")
         self.device = torch.device(device)
+        self.num_workers = num_workers
 
         # set the dataset
         self.dataset = dataset
@@ -184,7 +188,7 @@ class PeakModel():
                                                     continuous = self.single_cell,
                                                     similarity_targets= dataset.similarity_targets,
                                                     radii = radii, mode = Dataset.TRAIN),
-                                                    batch_size, shuffle_size, prefetch_size)
+                                                    batch_size, shuffle_size, prefetch_size, self.num_workers)
 
         input_shapes, output_shape, self.train_iter = generator_to_tf_dataset(load_data(self.dataset.get_data(Dataset.TRAIN),
                                                 self.eval_cell_types,
@@ -464,7 +468,7 @@ class PeakModel():
                  mode = Dataset.RUNTIME,
                  similarity_matrix = matrix,
                  similarity_targets = self.dataset.similarity_targets,
-                 indices = filtered_indices), self.batch_size, 1, self.prefetch_size)
+                 indices = filtered_indices), self.batch_size, 1, self.prefetch_size, self.num_workers)
 
         num_samples = len(filtered_indices)
         results = self.run_predictions(num_samples, ds, calculate_metrics = False)['preds']
