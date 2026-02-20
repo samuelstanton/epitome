@@ -18,6 +18,10 @@ also includes scripts for processing ENCODE peaks.
 
 """
 
+import logging
 from os.path import expanduser
+
+# Library-level NullHandler so callers control output (PEP 396)
+logging.getLogger('epitome').addHandler(logging.NullHandler())
 
 __path__ = __import__('pkgutil').extend_path(__path__, __name__)

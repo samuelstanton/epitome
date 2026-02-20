@@ -14,6 +14,7 @@ Models
 
 from epitome import *
 import itertools
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,6 +24,7 @@ from .functions import *
 from .constants import Dataset, Label
 from .generators import build_dataloader, load_data
 from .dataset import EpitomeDataset
+from .experiment import Experiment
 from .metrics import *
 from .conversion import *
 import numpy as np
@@ -35,6 +37,8 @@ import os
 # for saving model
 import pickle
 from operator import itemgetter
+
+logger = logging.getLogger('epitome')
 
 
 #######################################################################
@@ -116,7 +120,8 @@ class PeakModel():
                  checkpoint = None,
                  max_valid_batches = None,
                  device = None,
-                 num_workers = 0):
+                 num_workers = 0,
+                 experiment = None):
         '''
         Initializes Peak Model
 
@@ -138,6 +143,8 @@ class PeakModel():
         :type device: str or torch.device or None
         :param int num_workers: number of DataLoader worker processes for background data loading.
             0 (default) loads in the main process. 2-4 typically saturates the GPU pipeline.
+        :param Experiment experiment: experiment tracker. Auto-created if None.
+        :type experiment: Experiment or None
         '''
 
         # resolve device
@@ -150,6 +157,7 @@ class PeakModel():
                 device = torch.device("cpu")
         self.device = torch.device(device)
         self.num_workers = num_workers
+        self.experiment = experiment if experiment is not None else Experiment()
 
         # set the dataset
         self.dataset = dataset
@@ -176,7 +184,7 @@ class PeakModel():
 
             # Reserve chromosome 22 from the training data to validate model while training
             self.dataset.set_train_validation_indices(valid_chromosome)
-            print(self.dataset.get_data(Dataset.TRAIN_VALID).shape)
+            logger.debug("TRAIN_VALID shape: %s", self.dataset.get_data(Dataset.TRAIN_VALID).shape)
 
             # Creating a separate train-validation dataset
             _, _, self.train_valid_iter = build_dataloader(load_data(self.dataset.get_data(Dataset.TRAIN_VALID),
@@ -240,7 +248,20 @@ class PeakModel():
         self.debug = debug
         self.model = self.create_model().to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
-        print(f"EpitomeModel device: {self.device}")
+
+        logger.info("EpitomeModel device=%s run_id=%s", self.device, self.experiment.run_id)
+        self.experiment.log_config(
+            targets=list(dataset.targetmap),
+            cells=list(dataset.cellmap),
+            test_celltypes=test_celltypes,
+            assembly=getattr(dataset, 'assembly', None),
+            batch_size=batch_size,
+            lr=lr,
+            radii=radii,
+            device=str(self.device),
+            n_params=sum(p.numel() for p in self.model.parameters()),
+            num_workers=num_workers,
+        )
 
     def save(self, checkpoint_path):
         '''
@@ -265,7 +286,8 @@ class PeakModel():
                          'single_cell': self.single_cell,
                          'shuffle_size':self.shuffle_size,
                          'prefetch_size':self.prefetch_size,
-                         'radii':self.radii}
+                         'radii':self.radii,
+                         'run_id': self.experiment.run_id}
 
         with open(meta_path, 'wb') as f:
             pickle.dump(dict_, f)
@@ -322,7 +344,8 @@ class PeakModel():
           the train_validation losses (returns an empty list if self.max_valid_batches is None).
         :rtype: tuple
         '''
-        logging.info("Starting Training")
+        logger.info("Starting training run_id=%s", self.experiment.run_id)
+        t_start = time.monotonic()
 
         def train_step(f):
             features = [x.to(self.device) for x in f[:-2]]
@@ -365,8 +388,9 @@ class PeakModel():
             loss = train_step(f)
 
             if current_batch % 1000 == 0:
-                print(f"Batch: {current_batch}")
-                print(f"\tLoss: {loss.mean().item():.4f}")
+                mean_loss = loss.mean().item()
+                logger.info("batch=%d loss=%.4f", current_batch, mean_loss)
+                self.experiment.log_train_step(current_batch, mean_loss)
 
             if (current_batch % 200 == 0) and (self.max_valid_batches is not None):
                 # Early Stopping Validation
@@ -380,6 +404,7 @@ class PeakModel():
 
                 new_mean_valid_loss = torch.stack(new_valid_loss).mean()
                 train_valid_losses.append(new_mean_valid_loss.item())
+                self.experiment.log_valid_loss(current_batch, new_mean_valid_loss.item())
 
                 improvement = mean_valid_loss - new_mean_valid_loss.item()
                 if improvement < min_delta:
@@ -394,6 +419,8 @@ class PeakModel():
             if (current_batch >= max_train_batches):
                 break
 
+        duration = time.monotonic() - t_start
+        self.experiment.log_train_complete(best_model_batches, max_train_batches, duration)
         return best_model_batches, max_train_batches, train_valid_losses
 
     def test(self, num_samples, mode = Dataset.VALID, calculate_metrics=False):
@@ -416,7 +443,7 @@ class PeakModel():
         else:
             raise Exception("No data exists for %s. Use function test_from_generator() if you want to create a new iterator." % (mode))
 
-        return self.run_predictions(num_samples, handle, calculate_metrics)
+        return self.run_predictions(num_samples, handle, calculate_metrics, log_mode=mode.name.lower())
 
     def test_from_generator(self, num_samples, ds, calculate_metrics=True):
         '''
@@ -514,7 +541,7 @@ class PeakModel():
         '''
         return self.predict_step_generator(numpy_matrix)
 
-    def run_predictions(self, num_samples, iter_, calculate_metrics = True):
+    def run_predictions(self, num_samples, iter_, calculate_metrics = True, log_mode = 'eval'):
         '''
         Runs predictions on num_samples records
 
@@ -585,12 +612,12 @@ class PeakModel():
             auROC = np.nanmean(list(map(lambda x: x['AUC'],target_dict.values())))
             auPRC = np.nanmean(list(map(lambda x: x['auPRC'],target_dict.values())))
 
-            logging.info("macro auROC: " + str(auROC))
-            logging.info("auPRC: " + str(auPRC))
+            logger.info("mode=%s auROC=%.4f auPRC=%.4f", log_mode, auROC, auPRC)
+            self.experiment.log_eval(log_mode, num_samples, auROC, auPRC, target_dict)
         except ValueError:
             auROC = None
             auPRC = None
-            logging.info("Failed to calculate metrics")
+            logger.warning("Failed to calculate metrics for mode=%s", log_mode)
 
         return {
             'preds': preds,
@@ -629,10 +656,10 @@ class PeakModel():
 
         idx = np.array(sorted(list(regions.idx)))
 
-        print("scoring %i regions" % idx.shape[0])
+        logger.info("scoring %d regions", idx.shape[0])
 
         predictions = self.eval_vector(peak_matrix, idx)
-        print("finished predictions...", predictions.shape)
+        logger.info("finished predictions shape=%s", predictions.shape)
 
         # return matrix of region, TF information. trim off idx column
         npRegions =  regions.df.sort_values(by='idx').drop(labels='idx', axis=1).values
@@ -648,7 +675,7 @@ class PeakModel():
         np.savez_compressed(file_prefix, preds = preds,
                             names=np.array(['chr','start','end'] + self.dataset.predict_targets))
 
-        print("columns for matrices are chr, start, end, %s" % ", ".join(self.dataset.predict_targets))
+        logger.info("columns: chr, start, end, %s", ", ".join(self.dataset.predict_targets))
 
     def score_matrix(self, accessilibility_peak_matrix, regions):
         """ Runs predictions on a matrix of accessibility peaks, where columns are samples and
@@ -710,13 +737,13 @@ class PeakModel():
         # get indices in self.dataset.regions that we will be scoring
         idx = compareObject.get_base_overlap_index()
 
-        print("scoring %i regions" % idx.shape[0])
+        logger.info("scoring %d regions", idx.shape[0])
 
         if len(idx) == 0:
             raise ValueError("No positive peaks found in %s" % regions_peak_file)
 
         preds = self.eval_vector(peak_matrix, idx)
-        print("finished predictions...", preds.shape)
+        logger.info("finished predictions shape=%s", preds.shape)
 
         if not isinstance(preds, np.ndarray):
             preds = np.array(preds)
@@ -750,6 +777,7 @@ class EpitomeModel(PeakModel):
             dataset = EpitomeDataset(**metadata['dataset_params'])
             metadata['dataset'] = dataset
             del metadata['dataset_params']
+            metadata.pop('run_id', None)  # informational only; not a constructor param
 
             PeakModel.__init__(self, **metadata, **kwargs)
 

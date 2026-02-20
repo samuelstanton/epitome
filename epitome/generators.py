@@ -11,10 +11,13 @@ Data Generator Functions
   build_dataloader
 """
 
+import logging
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, IterableDataset
 from .constants import Dataset
+
+logger = logging.getLogger('epitome')
 from .functions import *
 from .sampling import *
 from .dataset import EpitomeDataset
@@ -150,7 +153,7 @@ def load_data(data,
                 # We use this for testing so models converge quickly
                 # with all ones.
                 if np.any(np.isnan(indices_probs)):
-                  print("Warning: no negative examples in dataset!!!")
+                  logger.warning("no negative examples in dataset; using uniform sampling")
                   indices_probs[:] = 1/indices_probs.shape[0]
 
                 # randomly select 10 fold sites where TF is not in any cell line
@@ -169,7 +172,7 @@ def load_data(data,
             "similarity_matrix is missing data for targets (should have %i rows)" % (len(similarity_targets))
         random_cell = list(cellmap)[0] # placeholder to get label vector length
 
-    print("using %s as labels for mode %s" % (label_cell_types, mode))
+    logger.debug("using %s as labels for mode %s", label_cell_types, mode)
 
     # string of radii for meta data labeling
     radii_str = list(map(lambda x: "RADII_%i" % x, radii))

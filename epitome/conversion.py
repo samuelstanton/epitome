@@ -10,6 +10,7 @@ Conversion
   RegionConversion
 """
 
+import warnings
 from .functions import bed2Pyranges
 import pyranges as pr
 import numpy as np
@@ -54,10 +55,10 @@ class RegionConversion:
         elif type(regions) == pr.PyRanges:
             if 'idx' not in regions.columns:
                 regions.idx = np.arange(0, len(regions))
-                print("Warning: regions pyranges must have column named 'idx'")
+                warnings.warn("regions PyRanges must have column named 'idx'")
             regions_bed = regions
         else:
-            raise Exception("regions must be type scoring or pr.Pyranges, but got type %s" % type(regions))
+            raise ValueError("regions must be type str or pr.PyRanges, but got type %s" % type(regions))
         return regions_bed
 
 

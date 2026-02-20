@@ -303,7 +303,7 @@ class EpitomeDataset:
         elif (data_dir is not None):
             epitome_data_dir = data_dir
         else:
-            print("Warning: genome assembly was not set in EpitomeDataset. Defaulting assembly to %s." % DEFAULT_EPITOME_ASSEMBLY)
+            warnings.warn("genome assembly was not set in EpitomeDataset. Defaulting assembly to %s." % DEFAULT_EPITOME_ASSEMBLY)
             epitome_data_dir = os.path.join(DEFAULT_EPITOME_DATA_PATH, DEFAULT_EPITOME_ASSEMBLY)
             assembly = DEFAULT_EPITOME_ASSEMBLY
         return epitome_data_dir, assembly
