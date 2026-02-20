@@ -88,6 +88,7 @@ def run_trial(
     max_valid_batches: int,
     val_every: int,
     val_batches: int,
+    test_batches: int,
     patience: int,
     min_delta: float,
     warmup_steps: int,
@@ -96,10 +97,13 @@ def run_trial(
     group: str,
 ) -> dict:
     import os
+    from pathlib import Path
+
     # Redirect ~/.epitome to the shared volume so data is cached across runs.
     os.environ["HOME"] = VOLUME_PATH
 
     from epitome.dataset import EpitomeDataset
+    from epitome.constants import Dataset
     from epitome.models import EpitomeModel
     from epitome.tuning import _best_val_loss
 
@@ -125,19 +129,35 @@ def run_trial(
         val_batches=val_batches,
     )
 
+    # Evaluate on held-out test chromosomes
+    test_results = model.test(
+        test_batches * batch_size,
+        mode=Dataset.TEST,
+        calculate_metrics=True,
+    )
+    test_auROC = test_results["auROC"]
+    test_auPRC = test_results["auPRC"]
+
+    # Save checkpoint to volume
+    checkpoint_path = str(Path(VOLUME_PATH) / "checkpoints" / model.experiment.run_id)
+    model.save(checkpoint_path)
+
     best_val = _best_val_loss(model.experiment.log_path)
     log = open(model.experiment.log_path).read()
     run_id = model.experiment.run_id
     model.experiment.close()
-    volume.commit()  # persist JSONL logs to volume
+    volume.commit()  # persist checkpoint + JSONL logs
 
     return {
         "lr": lr,
         "best_batch": best_batch,
         "stopped_at": stopped_at,
         "best_val_loss": best_val,
+        "test_auROC": test_auROC,
+        "test_auPRC": test_auPRC,
         "run_id": run_id,
-        "log": log,          # full JSONL returned so caller can write locally
+        "checkpoint_path": checkpoint_path,
+        "log": log,
     }
 
 
@@ -156,6 +176,7 @@ def sweep(
     max_valid_batches: int = 100,
     val_every: int = 500,
     val_batches: int = 50,
+    test_batches: int = 200,
     patience: int = 5,
     min_delta: float = 0.001,
     warmup_steps: int = 200,
@@ -187,7 +208,7 @@ def sweep(
     args = [
         (lr, assembly, parsed_targets, parsed_cells, parsed_test,
          max_train_batches, max_valid_batches, val_every, val_batches,
-         patience, min_delta, warmup_steps, min_lr, batch_size, sweep_group)
+         test_batches, patience, min_delta, warmup_steps, min_lr, batch_size, sweep_group)
         for lr in parsed_lr
     ]
 
@@ -203,14 +224,17 @@ def sweep(
         (log_dir / f"{r['run_id']}.jsonl").write_text(r["log"])
 
     # Print summary table
-    print(f"\n── Sweep results ({sweep_group}) ──────────────────────────")
-    print(f"{'rank':<6}{'lr':<12}{'best_val_loss':<16}{'stopped_at':<14}best_batch")
+    print(f"\n── Sweep results ({sweep_group}) ──────────────────────────────────────────")
+    print(f"{'rank':<6}{'lr':<10}{'val_loss':<14}{'test_auROC':<14}{'test_auPRC':<14}{'stopped_at':<13}best_batch")
     for i, r in enumerate(results):
-        print(f"{i:<6}{r['lr']:<12.0e}{r['best_val_loss']:<16.4f}{r['stopped_at']:<14}{r['best_batch']}")
+        auroc = f"{r['test_auROC']:.4f}" if r['test_auROC'] is not None else "n/a"
+        auprc = f"{r['test_auPRC']:.4f}" if r['test_auPRC'] is not None else "n/a"
+        print(f"{i:<6}{r['lr']:<10.0e}{r['best_val_loss']:<14.4f}{auroc:<14}{auprc:<14}{r['stopped_at']:<13}{r['best_batch']}")
 
     best = results[0]
     print(f"\nBest: lr={best['lr']:.0e}  run_id={best['run_id']}")
-    print(f"Retrain: model.train({best['stopped_at']})")
+    print(f"Checkpoint: {best['checkpoint_path']}")
+    print(f"Retrain:    model.train({best['stopped_at']})")
 
     # Save summary JSON locally
     summary = {
