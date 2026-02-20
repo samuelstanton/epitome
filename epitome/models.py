@@ -125,7 +125,8 @@ class PeakModel():
                  experiment = None,
                  group = None,
                  warmup_steps = 0,
-                 min_lr = 0.):
+                 min_lr = 0.,
+                 similarity_kernel = 'dot_agree'):
         '''
         Initializes Peak Model
 
@@ -153,6 +154,7 @@ class PeakModel():
             Ignored if experiment is provided explicitly.
         :param int warmup_steps: number of linear warmup steps before cosine decay (default 0).
         :param float min_lr: minimum learning rate at the end of cosine decay (default 0).
+        :param str similarity_kernel: 'dot_agree' (default) or 'jaccard'. See load_data.
         '''
 
         # resolve device
@@ -165,6 +167,7 @@ class PeakModel():
                 device = torch.device("cpu")
         self.device = torch.device(device)
         self.num_workers = num_workers
+        self.similarity_kernel = similarity_kernel
         self.experiment = experiment if experiment is not None else Experiment(group=group)
 
         # set the dataset
@@ -214,6 +217,7 @@ class PeakModel():
                                                 dataset.cellmap,
                                                 continuous = self.single_cell,
                                                 similarity_targets = dataset.similarity_targets,
+                                                similarity_kernel = self.similarity_kernel,
                                                 radii = radii, mode = Dataset.TRAIN),
                                                 batch_size, shuffle_size, prefetch_size)
 
@@ -225,6 +229,7 @@ class PeakModel():
                                                 dataset.cellmap,
                                                 continuous = self.single_cell,
                                                 similarity_targets = dataset.similarity_targets,
+                                                similarity_kernel = self.similarity_kernel,
                                                 radii = radii, mode = Dataset.VALID),
                                                 batch_size, 1, prefetch_size)
 
@@ -238,6 +243,7 @@ class PeakModel():
                                                    dataset.cellmap,
                                                    continuous = self.single_cell,
                                                    similarity_targets = dataset.similarity_targets,
+                                                   similarity_kernel = self.similarity_kernel,
                                                    radii = radii, mode = Dataset.TEST),
                                                    batch_size, 1, prefetch_size)
 
@@ -256,7 +262,6 @@ class PeakModel():
         self.debug = debug
         self.warmup_steps = warmup_steps
         self.min_lr = min_lr
-
         self.model = self.create_model().to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
@@ -274,6 +279,7 @@ class PeakModel():
             num_workers=num_workers,
             warmup_steps=warmup_steps,
             min_lr=min_lr,
+            similarity_kernel=similarity_kernel,
         )
 
     def save(self, checkpoint_path):
@@ -302,6 +308,7 @@ class PeakModel():
                          'radii':self.radii,
                          'warmup_steps':self.warmup_steps,
                          'min_lr':self.min_lr,
+                         'similarity_kernel':self.similarity_kernel,
                          'run_id': self.experiment.run_id}
 
         with open(meta_path, 'wb') as f:
@@ -546,6 +553,7 @@ class PeakModel():
                  mode = Dataset.RUNTIME,
                  similarity_matrix = matrix,
                  similarity_targets = self.dataset.similarity_targets,
+                 similarity_kernel = self.similarity_kernel,
                  indices = filtered_indices), self.batch_size, 1, self.prefetch_size, self.num_workers)
 
         num_samples = len(filtered_indices)

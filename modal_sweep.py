@@ -95,6 +95,7 @@ def run_trial(
     min_lr: float,
     batch_size: int,
     group: str,
+    similarity_kernel: str,
 ) -> dict:
     import os
     from pathlib import Path
@@ -119,6 +120,7 @@ def run_trial(
         batch_size=batch_size,
         group=group,
         num_workers=4,
+        similarity_kernel=similarity_kernel,
     )
 
     best_batch, stopped_at, _ = model.train(
@@ -183,6 +185,7 @@ def sweep(
     min_lr: float = 0.0,
     batch_size: int = 1024,
     group: str = "",
+    similarity_kernel: str = "dot_agree",
     dry_run: bool = False,
 ):
     from epitome.experiment import _make_run_id
@@ -199,6 +202,7 @@ def sweep(
     print(f"test_celltypes: {parsed_test}")
     print(f"lr_values     : {parsed_lr}")
     print(f"max_train_batches: {max_train_batches}  warmup_steps: {warmup_steps}")
+    print(f"similarity_kernel: {similarity_kernel}")
 
     if dry_run:
         print("\n[dry run] exiting without submitting jobs")
@@ -208,7 +212,8 @@ def sweep(
     args = [
         (lr, assembly, parsed_targets, parsed_cells, parsed_test,
          max_train_batches, max_valid_batches, val_every, val_batches,
-         test_batches, patience, min_delta, warmup_steps, min_lr, batch_size, sweep_group)
+         test_batches, patience, min_delta, warmup_steps, min_lr, batch_size, sweep_group,
+         similarity_kernel)
         for lr in parsed_lr
     ]
 

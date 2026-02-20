@@ -57,6 +57,7 @@ def load_data(data,
                  indices = None,
                  continuous = False,
                  return_feature_names = False,
+                 similarity_kernel = 'dot_agree',
                  **kwargs):
     """
     Takes Deepsea data and calculates distance metrics from cell types whose locations
@@ -76,6 +77,9 @@ def load_data(data,
     :param boolean continuous: determines whether similarity_matrix has continuous values. If continuous, we do not calculate agreement in the decreasing_train_valid_iters
       TODO: remove this eventually, if you can show agreement does not help performance
     :param return_feature_names: boolean whether to return string names of features
+    :param str similarity_kernel: how to summarise chromatin similarity per shell.
+        'dot_agree' (default): mean(A*B) and mean(A==B) — 2 values per shell per sim target.
+        'jaccard': |A∩B|/|A∪B| — 1 value per shell per sim target, ignores double-zeros.
     :param kwargs: kargs
 
     :returns: generator of data with three elements:
@@ -232,12 +236,28 @@ def load_data(data,
                     # slice arrays by radii
                     pos_arrays = np.split(pos, split_indices, axis= -1 )
 
-                    if not continuous:
-                      agree_arrays = np.split(agree, split_indices, axis = -1)
-                      similarities = np.stack(list(map(lambda x: np.average(x, axis = -1), pos_arrays + agree_arrays)),axis=1)
+                    if similarity_kernel == 'jaccard':
+                        # Jaccard = |A∩B| / |A∪B|, ignoring double-zero bins.
+                        # pos already = A*B (intersection); compute union separately.
+                        if mode == Dataset.RUNTIME:
+                            union = (cell_train_data.astype(bool) |
+                                     similarity_matrix[:, radius_indices].astype(bool)).astype(float)
+                        else:
+                            union = (cell_train_data.astype(bool) |
+                                     cell_label_data.astype(bool)).astype(float)
+                        union_arrays = np.split(union, split_indices, axis=-1)
+                        jaccard_arrays = []
+                        for p_arr, u_arr in zip(pos_arrays, union_arrays):
+                            num = np.average(p_arr, axis=-1)
+                            den = np.average(u_arr, axis=-1)
+                            jaccard_arrays.append(np.where(den > 0, num / den, 0.0))
+                        similarities = np.stack(jaccard_arrays, axis=1)
+                    elif not continuous:
+                        agree_arrays = np.split(agree, split_indices, axis = -1)
+                        similarities = np.stack(list(map(lambda x: np.average(x, axis = -1), pos_arrays + agree_arrays)),axis=1)
                     else:
-                      # don't use agreement features when there are continuous values
-                      similarities = np.stack(list(map(lambda x: np.average(x, axis = -1), pos_arrays)),axis=1)
+                        # don't use agreement features when there are continuous values
+                        similarities = np.stack(list(map(lambda x: np.average(x, axis = -1), pos_arrays)),axis=1)
                 else:
                     # no radius, so no similarities. just an empty placeholder
                     similarities = np.zeros((len(eval_cell_types),0,0))
@@ -297,7 +317,7 @@ def load_data(data,
     return g
 
 
-def build_dataloader(g, batch_size, shuffle_size, prefetch_size, num_workers=0):
+def build_dataloader(g, batch_size, shuffle_size, prefetch_size, num_workers=0, similarity_kernel='dot_agree'):
     """
     Creates a PyTorch DataLoader from a data generator.
 
