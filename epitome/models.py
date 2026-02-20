@@ -114,7 +114,8 @@ class PeakModel():
                  lr=1e-3,
                  radii=[1,3,10,30],
                  checkpoint = None,
-                 max_valid_batches = None):
+                 max_valid_batches = None,
+                 device = None):
         '''
         Initializes Peak Model
 
@@ -131,7 +132,20 @@ class PeakModel():
         :param list radii: radius of DNase-seq to consider around a peak of interest (default is [1,3,10,30]) each model.
         :param str checkpoint: path to load model from.
         :param int max_valid_batches: the size of train-validation dataset (default is None, meaning that it doesn't create a train-validation dataset or stop early while training)
+        :param device: torch device to run on (e.g. "cpu", "cuda", "mps"). Defaults to MPS if
+            available, CUDA if available, otherwise CPU.
+        :type device: str or torch.device or None
         '''
+
+        # resolve device
+        if device is None:
+            if torch.backends.mps.is_available():
+                device = torch.device("mps")
+            elif torch.cuda.is_available():
+                device = torch.device("cuda")
+            else:
+                device = torch.device("cpu")
+        self.device = torch.device(device)
 
         # set the dataset
         self.dataset = dataset
@@ -220,8 +234,9 @@ class PeakModel():
         # set self
         self.radii = radii
         self.debug = debug
-        self.model = self.create_model()
+        self.model = self.create_model().to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        print(f"EpitomeModel device: {self.device}")
 
     def save(self, checkpoint_path):
         '''
@@ -284,13 +299,6 @@ class PeakModel():
         :return: Loss summed over all TFs and genomic loci.
         :rtype: tensor
         '''
-        if not isinstance(y_true, torch.Tensor):
-            y_true = torch.as_tensor(np.asarray(y_true), dtype=torch.float32)
-        if not isinstance(y_pred, torch.Tensor):
-            y_pred = torch.as_tensor(np.asarray(y_pred), dtype=torch.float32)
-        if not isinstance(weights, torch.Tensor):
-            weights = torch.as_tensor(np.asarray(weights), dtype=torch.float32)
-
         loss = F.binary_cross_entropy_with_logits(y_pred, y_true, reduction='none')
         weighted_loss = loss * weights
         return weighted_loss.sum(dim=0)
@@ -313,9 +321,9 @@ class PeakModel():
         logging.info("Starting Training")
 
         def train_step(f):
-            features = f[:-2]
-            labels = f[-2]
-            weights = f[-1]
+            features = [x.to(self.device) for x in f[:-2]]
+            labels = f[-2].to(self.device)
+            weights = f[-1].to(self.device)
 
             self.model.train()
             self.optimizer.zero_grad()
@@ -334,9 +342,9 @@ class PeakModel():
             return loss.detach()
 
         def valid_step(f):
-            features = f[:-2]
-            labels = f[-2]
-            weights = f[-1]
+            features = [x.to(self.device) for x in f[:-2]]
+            labels = f[-2].to(self.device)
+            weights = f[-1].to(self.device)
 
             self.model.eval()
             with torch.no_grad():
@@ -473,21 +481,22 @@ class PeakModel():
         '''
         Runs predictions on inputs from run_predictions
 
-        :param inputs_b: batch of input data (tuple or tensor)
+        :param inputs_b: batch of input data (list/tuple of tensors, or a single array/tensor)
         :return: predictions
         :rtype: torch.Tensor
         '''
-        if isinstance(inputs_b, (list, tuple)):
-            features = inputs_b[0]
-        else:
-            features = inputs_b
+        if not isinstance(inputs_b, (list, tuple)):
+            inputs_b = [inputs_b]
 
-        if not isinstance(features, torch.Tensor):
-            features = torch.as_tensor(np.asarray(features), dtype=torch.float32)
+        inputs_b = [
+            x.to(self.device) if isinstance(x, torch.Tensor)
+            else torch.as_tensor(np.asarray(x), dtype=torch.float32).to(self.device)
+            for x in inputs_b
+        ]
 
         self.model.eval()
         with torch.no_grad():
-            return torch.sigmoid(self.model(features))
+            return torch.sigmoid(self.model(inputs_b))
 
     def _predict(self, numpy_matrix):
         '''
@@ -527,14 +536,14 @@ class PeakModel():
         sample_weight = []
 
         for f in tqdm.tqdm(itertools.islice(iter(iter_), batches)):
-            inputs_b = f[:-2]
+            inputs_b = [x.to(self.device) for x in f[:-2]]
             truth_b = f[-2]
             weights_b = f[-1]
             preds_b = self.predict_step_generator(inputs_b)
 
             preds.append(preds_b.cpu().numpy())
-            truth.append(truth_b.cpu().numpy())
-            sample_weight.append(weights_b.cpu().numpy())
+            truth.append(truth_b.numpy())
+            sample_weight.append(weights_b.numpy())
 
         # concat all results
         preds = np.concatenate(preds, axis=0)
@@ -741,7 +750,7 @@ class EpitomeModel(PeakModel):
             PeakModel.__init__(self, **metadata, **kwargs)
 
             weights_path = os.path.join(kwargs["checkpoint"], "weights.pt")
-            self.model.load_state_dict(torch.load(weights_path, map_location='cpu'))
+            self.model.load_state_dict(torch.load(weights_path, map_location=self.device))
 
         else:
             PeakModel.__init__(self, *args, **kwargs)
