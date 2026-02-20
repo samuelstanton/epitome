@@ -119,7 +119,7 @@ def run_trial(
         min_lr=min_lr,
         batch_size=batch_size,
         group=group,
-        num_workers=0,
+        num_workers=4,
         similarity_kernel=similarity_kernel,
     )
 
@@ -148,6 +148,7 @@ def run_trial(
     log = open(model.experiment.log_path).read()
     run_id = model.experiment.run_id
     model.experiment.close()
+    model.shutdown()  # terminate DataLoader workers before returning
     volume.commit()  # persist checkpoint + JSONL logs
 
     return {

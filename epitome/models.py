@@ -282,6 +282,16 @@ class PeakModel():
             similarity_kernel=similarity_kernel,
         )
 
+    def shutdown(self):
+        """
+        Shuts down DataLoader worker processes.
+        Call this before a Modal function returns to prevent worker processes
+        from keeping the container alive after the function completes.
+        """
+        for attr in ('train_iter', 'valid_iter', 'test_iter', 'train_valid_iter'):
+            if hasattr(self, attr):
+                delattr(self, attr)
+
     def save(self, checkpoint_path):
         '''
         Saves model.
