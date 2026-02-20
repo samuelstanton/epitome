@@ -64,7 +64,7 @@ image = (
         "requests",
     )
     # Install epitome from source so the container picks up local changes.
-    .add_local_dir(".", remote_path="/app/epitome", ignore=["**/.venv", "**/__pycache__", "**/.git"])
+    .add_local_dir(".", remote_path="/app/epitome", copy=True, ignore=["**/.venv", "**/__pycache__", "**/.git"])
     .run_commands("pip install -e /app/epitome --no-deps --quiet")
 )
 
