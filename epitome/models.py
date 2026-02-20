@@ -344,7 +344,7 @@ class PeakModel():
         weighted_loss = loss * weights
         return weighted_loss.sum(dim=0)
 
-    def train(self, max_train_batches, patience=3, min_delta=0.01):
+    def train(self, max_train_batches, patience=3, min_delta=0.01, val_every=500, val_batches=50):
         '''
         Trains an Epitome model. If the patience and min_delta are not specified, the model will train on max_train_batches.
         Else, the model will either train on max_train_batches or stop training early if the train_valid_loss is converging
@@ -354,6 +354,8 @@ class PeakModel():
         :param int patience: number of train-valid iterations (200 batches) with no improvement after which training will be stopped.
         :param float min_delta: minimum change in the monitored quantity to qualify as an improvement,
           i.e. an absolute change of less than min_delta, will count as no improvement.
+        :param int val_every: evaluate on the VALID split every this many batches. 0 disables. (default 500)
+        :param int val_batches: number of batches to use for each VALID evaluation. (default 50)
 
         :return triple of number of batches trained for the best model, number of batches the model has trained total,
           the train_validation losses (returns an empty list if self.max_valid_batches is None).
@@ -433,6 +435,13 @@ class PeakModel():
                 current_lr = scheduler.get_last_lr()[0]
                 logger.info("batch=%d loss=%.4f lr=%.2e", current_batch, mean_loss, current_lr)
                 self.experiment.log_train_step(current_batch, mean_loss, current_lr)
+
+            if val_every > 0 and current_batch % val_every == 0:
+                val_losses = [valid_step(f_v)
+                              for f_v in itertools.islice(iter(self.valid_iter), val_batches)]
+                mean_val = torch.stack(val_losses).mean().item()
+                logger.info("batch=%d val_loss=%.4f", current_batch, mean_val)
+                self.experiment.log_val_loss(current_batch, mean_val)
 
             if (current_batch % 200 == 0) and (self.max_valid_batches is not None):
                 # Early Stopping Validation

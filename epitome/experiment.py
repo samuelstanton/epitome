@@ -102,8 +102,12 @@ class Experiment:
             record['lr'] = float(lr)
         self._write(record)
 
+    def log_val_loss(self, batch: int, loss: float):
+        """Record periodic validation loss on the held-out VALID split."""
+        self._write({'event': 'val_loss', 'batch': batch, 'loss': round(float(loss), 6)})
+
     def log_valid_loss(self, batch: int, loss: float):
-        """Record early-stopping validation loss."""
+        """Record early-stopping validation loss on the TRAIN_VALID split."""
         self._write({'event': 'valid_loss', 'batch': batch, 'loss': round(float(loss), 6)})
 
     def log_train_complete(self, best_batch: int, total_batches: int, duration_s: float):
