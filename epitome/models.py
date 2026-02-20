@@ -13,12 +13,15 @@ Models
 
 
 from epitome import *
-import tensorflow as tf
+import itertools
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import pandas as pd
 
 from .functions import *
-from .constants import Dataset
-from .generators import generator_to_tf_dataset,load_data
+from .constants import Dataset, Label
+from .generators import generator_to_tf_dataset, load_data
 from .dataset import EpitomeDataset
 from .metrics import *
 from .conversion import *
@@ -32,6 +35,62 @@ import os
 # for saving model
 import pickle
 from operator import itemgetter
+
+
+#######################################################################
+#################### PyTorch Model Architecture ######################
+#######################################################################
+
+class EpitomeNet(nn.Module):
+    """
+    Multi-branch MLP for learning from ChIP-seq peaks.
+    Mirrors the original Keras architecture: each input branch has
+    ``n_layers`` Dense+Tanh layers with halving width, then branches
+    are concatenated and fed to a single output layer.
+    """
+
+    def __init__(self, num_inputs, num_outputs, n_layers=2, l1=0., l2=0.):
+        """
+        :param list num_inputs: list of input sizes, one per branch
+        :param int num_outputs: number of output units
+        :param int n_layers: number of dense layers per branch (default 2)
+        :param float l1: L1 activity regularization (default 0)
+        :param float l2: L2 activity regularization (default 0)
+        """
+        super().__init__()
+        self.l1 = l1
+        self.l2 = l2
+
+        self.branches = nn.ModuleList()
+        branch_output_sizes = []
+
+        for input_size in num_inputs:
+            layers = []
+            current_size = input_size
+            for j in range(n_layers):
+                out_size = int(input_size / (2 * (j + 1)))
+                layers.append(nn.Linear(current_size, out_size))
+                layers.append(nn.Tanh())
+                current_size = out_size
+            self.branches.append(nn.Sequential(*layers))
+            branch_output_sizes.append(current_size)
+
+        concat_size = sum(branch_output_sizes)
+        self.output_layer = nn.Linear(concat_size, num_outputs)
+
+    def forward(self, inputs):
+        if not isinstance(inputs, (list, tuple)):
+            inputs = [inputs]
+
+        branch_outputs = []
+        for branch, x in zip(self.branches, inputs):
+            if not isinstance(x, torch.Tensor):
+                x = torch.as_tensor(np.asarray(x), dtype=torch.float32)
+            branch_outputs.append(branch(x))
+
+        combined = branch_outputs[0] if len(branch_outputs) == 1 else torch.cat(branch_outputs, dim=-1)
+        return self.output_layer(combined)
+
 
 #######################################################################
 #################### Variational Peak Model ###########################
@@ -66,15 +125,13 @@ class PeakModel():
         :param int batch_size: batch size (default is 64)
         :param int shuffle_size: data shuffle size (default is 10)
         :param int prefetch_size: data prefetch size (default is 10)
-        :param floatl1: l1 regularization (default is 0)
+        :param float l1: l1 regularization (default is 0)
         :param float l2: l2 regularization (default is 0)
         :param float lr: lr (default is 1e-3)
         :param list radii: radius of DNase-seq to consider around a peak of interest (default is [1,3,10,30]) each model.
         :param str checkpoint: path to load model from.
         :param int max_valid_batches: the size of train-validation dataset (default is None, meaning that it doesn't create a train-validation dataset or stop early while training)
         '''
-
-        logging.getLogger("tensorflow").setLevel(logging.INFO)
 
         # set the dataset
         self.dataset = dataset
@@ -155,7 +212,6 @@ class PeakModel():
         self.batch_size = batch_size
         self.prefetch_size = prefetch_size
         self.shuffle_size = shuffle_size
-        self.optimizer =tf.compat.v1.train.AdamOptimizer(learning_rate=self.lr)
 
         self.num_outputs = output_shape[0]
         self.num_inputs = input_shapes
@@ -165,6 +221,7 @@ class PeakModel():
         self.radii = radii
         self.debug = debug
         self.model = self.create_model()
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
     def save(self, checkpoint_path):
         '''
@@ -173,18 +230,13 @@ class PeakModel():
         :param str checkpoint_path: string file path to save model to.
         '''
 
-        weights_path = os.path.join(checkpoint_path, "weights.h5")
+        weights_path = os.path.join(checkpoint_path, "weights.pt")
         meta_path = os.path.join(checkpoint_path, "model_params.pickle")
 
-        # save keras model weights
         if not os.path.exists(checkpoint_path):
             os.makedirs(checkpoint_path)
 
-        file = h5py.File(weights_path, 'w')
-        weight = self.model.get_weights()
-        for i in range(len(weight)):
-            file.create_dataset('weight' + str(i), data=weight[i])
-        file.close()
+        torch.save(self.model.state_dict(), weights_path)
 
         # save model params to pickle file
         dict_ = {'dataset_params': self.dataset.get_parameter_dict(),
@@ -196,9 +248,8 @@ class PeakModel():
                          'prefetch_size':self.prefetch_size,
                          'radii':self.radii}
 
-        fileObject = open(meta_path,'wb')
-        pickle.dump(dict_,fileObject)
-        fileObject.close()
+        with open(meta_path, 'wb') as f:
+            pickle.dump(dict_, f)
 
     def body_fn(self):
         raise NotImplementedError()
@@ -219,7 +270,7 @@ class PeakModel():
          :rtype: float
 
         '''
-        return a * tf.math.pow(p, y) + B
+        return a * p**y + B
 
     def loss_fn(self, y_true, y_pred, weights):
         '''
@@ -233,14 +284,16 @@ class PeakModel():
         :return: Loss summed over all TFs and genomic loci.
         :rtype: tensor
         '''
-        # weighted sum of cross entropy for non 0 weights
-        # Reduction method = Reduction.SUM_BY_NONZERO_WEIGHTS
-        loss = tf.compat.v1.losses.sigmoid_cross_entropy(y_true,
-                                                        y_pred,
-                                                        weights = weights,
-                                                        reduction = tf.compat.v1.losses.Reduction.NONE)
+        if not isinstance(y_true, torch.Tensor):
+            y_true = torch.as_tensor(np.asarray(y_true), dtype=torch.float32)
+        if not isinstance(y_pred, torch.Tensor):
+            y_pred = torch.as_tensor(np.asarray(y_pred), dtype=torch.float32)
+        if not isinstance(weights, torch.Tensor):
+            weights = torch.as_tensor(np.asarray(weights), dtype=torch.float32)
 
-        return tf.math.reduce_sum(loss, axis=0)
+        loss = F.binary_cross_entropy_with_logits(y_pred, y_true, reduction='none')
+        weighted_loss = loss * weights
+        return weighted_loss.sum(dim=0)
 
     def train(self, max_train_batches, patience=3, min_delta=0.01):
         '''
@@ -257,79 +310,79 @@ class PeakModel():
           the train_validation losses (returns an empty list if self.max_valid_batches is None).
         :rtype: tuple
         '''
-        tf.compat.v1.logging.info("Starting Training")
+        logging.info("Starting Training")
 
-        @tf.function
         def train_step(f):
             features = f[:-2]
             labels = f[-2]
             weights = f[-1]
 
-            with tf.GradientTape() as tape:
+            self.model.train()
+            self.optimizer.zero_grad()
+            logits = self.model(features)
+            loss = self.loss_fn(labels, logits, weights)
 
-                logits = self.model(features, training=True)
-                loss = self.loss_fn(labels, logits, weights)
+            total_loss = loss.sum()
+            # Activity regularization on logits (matches Keras activity_regularizer on output layer)
+            if self.l1 > 0:
+                total_loss = total_loss + self.l1 * logits.abs().sum()
+            if self.l2 > 0:
+                total_loss = total_loss + self.l2 * (logits ** 2).sum()
 
-            gradients = tape.gradient(loss, self.model.trainable_variables)
-            self.optimizer.apply_gradients(zip(gradients, self.model.trainable_variables))
+            total_loss.backward()
+            self.optimizer.step()
+            return loss.detach()
 
-            return loss
-
-        @tf.function
         def valid_step(f):
             features = f[:-2]
             labels = f[-2]
             weights = f[-1]
-            logits = self.model(features, training=False)
-            neg_log_likelihood = self.loss_fn(labels, logits, weights)
-            return neg_log_likelihood
 
-        def loopiter():
-            # Initializing variables
-            mean_valid_loss, decreasing_train_valid_iters, best_model_batches = sys.maxsize, 0, 0
-            train_valid_losses = []
+            self.model.eval()
+            with torch.no_grad():
+                logits = self.model(features)
+                return self.loss_fn(labels, logits, weights).detach()
 
-            for current_batch, f in enumerate(self.train_iter):
-                loss = train_step(f)
+        # Initializing variables
+        mean_valid_loss = float('inf')
+        decreasing_train_valid_iters = 0
+        best_model_batches = 0
+        train_valid_losses = []
 
-                if current_batch % 1000 == 0:
-                  tf.print("Batch: ", current_batch)
-                  tf.print("\tLoss: ", tf.reduce_mean(loss))
+        for current_batch, f in enumerate(self.train_iter):
+            loss = train_step(f)
 
-                if (current_batch % 200 == 0) and (self.max_valid_batches is not None):
-                    # Early Stopping Validation
-                    new_valid_loss = []
+            if current_batch % 1000 == 0:
+                print(f"Batch: {current_batch}")
+                print(f"\tLoss: {loss.mean().item():.4f}")
 
-                    for current_valid_batch, f_v in enumerate(self.train_valid_iter):
-                        new_valid_loss.append(valid_step(f_v))
+            if (current_batch % 200 == 0) and (self.max_valid_batches is not None):
+                # Early Stopping Validation
+                new_valid_loss = []
 
-                        if (current_valid_batch == self.max_valid_batches):
-                            break
+                for current_valid_batch, f_v in enumerate(self.train_valid_iter):
+                    new_valid_loss.append(valid_step(f_v))
 
-                    new_mean_valid_loss = tf.reduce_mean(new_valid_loss)
-                    train_valid_losses.append(new_mean_valid_loss)
+                    if (current_valid_batch == self.max_valid_batches):
+                        break
 
+                new_mean_valid_loss = torch.stack(new_valid_loss).mean()
+                train_valid_losses.append(new_mean_valid_loss.item())
 
-                    # Check if the improvement in train-validation loss is at least min_delta.
-                    # If the train-validation loss has increased more than patience consecutive train-validation iterations, the function stops early.
-                    # Else it continues training.
-                    improvement = mean_valid_loss - new_mean_valid_loss
-                    if improvement < min_delta:
-                        decreasing_train_valid_iters += 1
-                        if decreasing_train_valid_iters == patience:
-                            return best_model_batches, current_batch, train_valid_losses
-                    else:
-                        # If the train-validation loss decreases (the model is improving and converging), reset decreasing_train_valid_iters and mean_valid_loss.
-                        decreasing_train_valid_iters = 0
-                        mean_valid_loss = new_mean_valid_loss
-                        best_model_batches = current_batch
+                improvement = mean_valid_loss - new_mean_valid_loss.item()
+                if improvement < min_delta:
+                    decreasing_train_valid_iters += 1
+                    if decreasing_train_valid_iters == patience:
+                        return best_model_batches, current_batch, train_valid_losses
+                else:
+                    decreasing_train_valid_iters = 0
+                    mean_valid_loss = new_mean_valid_loss.item()
+                    best_model_batches = current_batch
 
-                if (current_batch >= max_train_batches):
-                    break
+            if (current_batch >= max_train_batches):
+                break
 
-            return best_model_batches, max_train_batches, train_valid_losses
-
-        return loopiter()
+        return best_model_batches, max_train_batches, train_valid_losses
 
     def test(self, num_samples, mode = Dataset.VALID, calculate_metrics=False):
         '''
@@ -358,7 +411,7 @@ class PeakModel():
         Runs test given a specified data generator.
 
         :param int num_samples: number of samples to test
-        :param tensorflow dataset ds: tensorflow dataset, created by dataset_to_tf_dataset
+        :param DataLoader ds: DataLoader, created by generator_to_tf_dataset
         :param bool calculate_metrics: whether to return auROC/auPR
         :return: predictions
         :rtype: dict
@@ -416,18 +469,25 @@ class PeakModel():
 
         return all_results
 
-    @tf.function
-    def predict_step_matrix(self, inputs):
-        """
-        Runs predictions on numpy matrix from _predict
+    def predict_step_generator(self, inputs_b):
+        '''
+        Runs predictions on inputs from run_predictions
 
-        :param np.ndarray inputs: numpy matrix of examples x features
+        :param inputs_b: batch of input data (tuple or tensor)
         :return: predictions
-        :rtype: np.ndarray
-        """
+        :rtype: torch.Tensor
+        '''
+        if isinstance(inputs_b, (list, tuple)):
+            features = inputs_b[0]
+        else:
+            features = inputs_b
 
-        # predict
-        return self.predict_step_generator(inputs)
+        if not isinstance(features, torch.Tensor):
+            features = torch.as_tensor(np.asarray(features), dtype=torch.float32)
+
+        self.model.eval()
+        with torch.no_grad():
+            return torch.sigmoid(self.model(features))
 
     def _predict(self, numpy_matrix):
         '''
@@ -439,25 +499,14 @@ class PeakModel():
         :return: predictions
         :rtype: tensor
         '''
-        return self.predict_step_matrix(numpy_matrix)
-
-    @tf.function
-    def predict_step_generator(self, inputs_b):
-        '''
-        Runs predictions on inputs from run_predictions
-
-        :param tf.Tensor inputs_b: batch of input data
-        :return: predictions
-        :rtype: tuple
-        '''
-        return tf.sigmoid(self.model(inputs_b))
+        return self.predict_step_generator(numpy_matrix)
 
     def run_predictions(self, num_samples, iter_, calculate_metrics = True):
         '''
         Runs predictions on num_samples records
 
         :param int num_samples: number of samples to test
-        :param tf.dataset iter_: output of self.sess.run(generator_to_one_shot_iterator()), handle to one shot iterator of records
+        :param DataLoader iter_: DataLoader from generator_to_tf_dataset
         :param bool calculate_metrics: whether to return auROC/auPR
 
         :return: dict of preds, truth, target_dict, auROC, auPRC, False
@@ -470,33 +519,32 @@ class PeakModel():
         :rtype: dict
         '''
 
-        batches = int(num_samples / self.batch_size)+1
+        batches = int(num_samples / self.batch_size) + 1
 
         # empty arrays for concatenation
         truth = []
         preds = []
         sample_weight = []
 
-        for f in tqdm.tqdm(iter_.take(batches)):
+        for f in tqdm.tqdm(itertools.islice(iter(iter_), batches)):
             inputs_b = f[:-2]
             truth_b = f[-2]
             weights_b = f[-1]
             preds_b = self.predict_step_generator(inputs_b)
 
-            preds.append(preds_b)
-            truth.append(truth_b)
-            sample_weight.append(weights_b)
+            preds.append(preds_b.cpu().numpy())
+            truth.append(truth_b.cpu().numpy())
+            sample_weight.append(weights_b.cpu().numpy())
 
         # concat all results
-        preds = tf.concat(preds, axis=0)
-
-        truth = tf.concat(truth, axis=0)
-        sample_weight = tf.concat(sample_weight, axis=0)
+        preds = np.concatenate(preds, axis=0)
+        truth = np.concatenate(truth, axis=0)
+        sample_weight = np.concatenate(sample_weight, axis=0)
 
         # trim off extra from last batch
-        truth = truth[:num_samples, :].numpy()
-        preds = preds[:num_samples, :].numpy()
-        sample_weight = sample_weight[:num_samples, :].numpy()
+        truth = truth[:num_samples, :]
+        preds = preds[:num_samples, :]
+        sample_weight = sample_weight[:num_samples, :]
 
         # reset truth back to 0 to compute metrics
         # sample weights will rule these out anyways when computing metrics
@@ -517,7 +565,6 @@ class PeakModel():
         assert(preds.shape == sample_weight.shape)
 
         try:
-
             # try/accept for cases with only one class (throws ValueError)
             target_dict = get_performance(self.dataset.targetmap, preds, truth_reset, sample_weight, self.dataset.predict_targets)
 
@@ -525,12 +572,12 @@ class PeakModel():
             auROC = np.nanmean(list(map(lambda x: x['AUC'],target_dict.values())))
             auPRC = np.nanmean(list(map(lambda x: x['auPRC'],target_dict.values())))
 
-            tf.compat.v1.logging.info("macro auROC:     " + str(auROC))
-            tf.compat.v1.logging.info("auPRC:     " + str(auPRC))
+            logging.info("macro auROC: " + str(auROC))
+            logging.info("auPRC: " + str(auPRC))
         except ValueError:
             auROC = None
             auPRC = None
-            tf.compat.v1.logging.info("Failed to calculate metrics")
+            logging.info("Failed to calculate metrics")
 
         return {
             'preds': preds,
@@ -659,9 +706,9 @@ class PeakModel():
         print("finished predictions...", preds.shape)
 
         if not isinstance(preds, np.ndarray):
-            preds = preds.numpy()
+            preds = np.array(preds)
 
-        merged_preds = compareObject.merge(preds, axis = 0) # TODO is this the correct axis?
+        merged_preds = compareObject.merge(preds, axis = 0)
 
         preds_df = pd.DataFrame(data=merged_preds, columns=self.dataset.predict_targets)
         return pd.concat([compareObject.compare_df(), preds_df], axis=1)
@@ -672,20 +719,19 @@ class EpitomeModel(PeakModel):
              *args,
              **kwargs):
         '''
-        Creates a new model with 4 layers with 100 unites each.
+        Creates a new model with 2 layers with halving width.
             To resume model training on an old model, call:
 
             .. code-block:: python
 
                 model = EpitomeModel(checkpoint=path_to_saved_model)
         '''
-        self.activation = tf.tanh
+        self.activation = torch.tanh
         self.layers = 2
 
         if "checkpoint" in kwargs.keys():
-            fileObject = open(kwargs["checkpoint"] + "/model_params.pickle" ,'rb')
-            metadata = pickle.load(fileObject)
-            fileObject.close()
+            with open(kwargs["checkpoint"] + "/model_params.pickle", 'rb') as fh:
+                metadata = pickle.load(fh)
 
             # reconstruct dataset and delete unused parameters
             dataset = EpitomeDataset(**metadata['dataset_params'])
@@ -693,14 +739,9 @@ class EpitomeModel(PeakModel):
             del metadata['dataset_params']
 
             PeakModel.__init__(self, **metadata, **kwargs)
-            file = h5py.File(os.path.join(kwargs["checkpoint"], "weights.h5"), 'r')
 
-            # load model weights back in
-            weights = []
-            for i in range(len(file.keys())):
-                weights.append(file['weight' + str(i)][:])
-            self.model.set_weights(weights)
-            file.close()
+            weights_path = os.path.join(kwargs["checkpoint"], "weights.pt")
+            self.model.load_state_dict(torch.load(weights_path, map_location='cpu'))
 
         else:
             PeakModel.__init__(self, *args, **kwargs)
@@ -709,33 +750,10 @@ class EpitomeModel(PeakModel):
         '''
         Creates an Epitome model.
         '''
-        cell_inputs = [tf.keras.layers.Input(shape=(self.num_inputs[i],))
-                       for i in range(len(self.num_inputs))]
-
-        # make a channel for each cell type
-        cell_channels = []
-
-        for i in range(len(self.num_inputs)):
-            # make input layer for cell
-            last = cell_inputs[i]
-            for j in range(self.layers):
-                num_units = int(self.num_inputs[i]/(2 * (j+1)))
-                d = tf.keras.layers.Dense(num_units,
-                                                activation = self.activation)(last)
-                last = d
-            cell_channels.append(last)
-
-
-        # merge together all cell channels
-        if (len(cell_channels) > 1):
-            last = tf.keras.layers.concatenate(cell_channels)
-        else:
-            last = cell_channels[0]
-
-        outputs =  tf.keras.layers.Dense(self.num_outputs,
-                                        activity_regularizer=tf.keras.regularizers.l1_l2(self.l1, self.l2),
-                                        name="output_layer")(last)
-
-        model = tf.keras.models.Model(inputs=cell_inputs, outputs=outputs)
-
-        return model
+        return EpitomeNet(
+            num_inputs=self.num_inputs,
+            num_outputs=self.num_outputs,
+            n_layers=self.layers,
+            l1=self.l1,
+            l2=self.l2,
+        )

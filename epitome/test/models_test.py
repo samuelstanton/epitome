@@ -6,7 +6,7 @@ from epitome.dataset import EpitomeDataset
 import pytest
 import tempfile
 import pyranges as pr
-import tensorflow as tf
+import torch
 from epitome.dataset import *
 import sys
 
@@ -57,7 +57,7 @@ class ModelsTest(EpitomeTestCase):
 		assert(results2['preds'][0] < results1['preds'].shape[0])
 
 	def test_train_early_stop_model(self):
-		tf.random.set_seed(5)
+		torch.manual_seed(5)
 		eligible_cells = ['K562','HepG2','H1']
 		eligible_targets = ['DNase','CTCF']
 
@@ -280,8 +280,6 @@ class ModelsTest(EpitomeTestCase):
 
 	def test_predict_step_matrix(self):
 
-		print(self.model.train_iter.element_spec[0].shape[-1])
-
-		numpy_matrix = np.zeros((2,self.model.train_iter.element_spec[0].shape[-1]))
+		numpy_matrix = np.zeros((2, self.model.num_inputs[0]))
 
 		self.model._predict(numpy_matrix)

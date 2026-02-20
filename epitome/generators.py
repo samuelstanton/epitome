@@ -12,7 +12,8 @@ Data Generator Functions
 """
 
 import numpy as np
-import tensorflow as tf
+import torch
+from torch.utils.data import DataLoader, IterableDataset
 from .constants import Dataset
 from .functions import *
 from .sampling import *
@@ -20,7 +21,23 @@ from .dataset import EpitomeDataset
 import glob
 
 ######################### Original Data Generator: Only peak based #####################
-np.random.seed(0) # to keep np.random.choice consistent
+np.random.seed(0)  # to keep np.random.choice consistent
+
+
+class _EpitomeIterableDataset(IterableDataset):
+    """Wraps a load_data generator function and cycles infinitely."""
+
+    def __init__(self, generator_fn):
+        self.generator_fn = generator_fn
+
+    def __iter__(self):
+        while True:
+            for features, labels, weights in self.generator_fn():
+                yield (
+                    torch.from_numpy(np.asarray(features, dtype=np.float32)),
+                    torch.from_numpy(np.asarray(labels, dtype=np.float32)),
+                    torch.from_numpy(np.asarray(weights, dtype=np.float32)),
+                )
 
 
 ############################### Channel generator ################################
@@ -279,46 +296,22 @@ def load_data(data,
 
 def generator_to_tf_dataset(g, batch_size, shuffle_size, prefetch_size):
     """
-    Generates a tensorflow dataset from a data generator.
+    Creates a PyTorch DataLoader from a data generator.
 
-    :param g: data generator
-    :param batch_size: number of elements in generator to combine into a single batch
-    :param shuffle_size: number of elements from the  generator fromw which the new dataset will shuffle
-    :param prefetch_size: maximum number of elements that will be buffered  when prefetching
+    :param g: data generator function (callable returning an iterator)
+    :param batch_size: number of elements to combine into a single batch
+    :param shuffle_size: unused (kept for API compatibility)
+    :param prefetch_size: unused (kept for API compatibility)
 
-    :returns: tuple of (label shape, tf.data.Dataset)
+    :returns: tuple of (input_shapes, output_shape, DataLoader)
     """
-
+    # Peek at first item to get shapes
     for f in g():
         break
+    features = f[:-2]  # 1-tuple of feature array(s)
     labels = f[-2]
-    target_mask = f[-1]
-    features = f[:-2]
-    shapes = []
 
-    for i in f:
-        shapes.append(i.shape)
+    dataset = _EpitomeIterableDataset(g)
+    loader = DataLoader(dataset, batch_size=batch_size)
 
-    try:
-        dataset = tf.data.Dataset.from_generator(
-            g,
-            output_types=(tf.float32,)* len(f),
-            output_shapes=tuple(shapes)
-        )
-    except NameError as e:
-        print("Error: no data, %s" % e)
-        dataset = tf.data.Dataset.from_generator(
-            g,
-            output_types=(tf.float32,)*len(features)
-        )
-
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.shuffle(shuffle_size)
-    dataset = dataset.repeat()
-    dataset = dataset.prefetch(prefetch_size)
-
-    try:
-        features
-        return [i.shape[0] for i in features], labels.shape, dataset
-    except NameError as e:
-        return None, None, dataset
+    return [feat.shape[0] for feat in features], labels.shape, loader
