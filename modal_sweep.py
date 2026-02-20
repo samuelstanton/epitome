@@ -119,7 +119,7 @@ def run_trial(
         min_lr=min_lr,
         batch_size=batch_size,
         group=group,
-        num_workers=4,
+        num_workers=0,
         similarity_kernel=similarity_kernel,
     )
 
