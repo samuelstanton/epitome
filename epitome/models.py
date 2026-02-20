@@ -33,6 +33,7 @@ import tqdm
 import logging
 import sys
 import os
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 # for saving model
 import pickle
@@ -122,7 +123,9 @@ class PeakModel():
                  device = None,
                  num_workers = 0,
                  experiment = None,
-                 group = None):
+                 group = None,
+                 warmup_steps = 0,
+                 min_lr = 0.):
         '''
         Initializes Peak Model
 
@@ -148,6 +151,8 @@ class PeakModel():
         :type experiment: Experiment or None
         :param str group: optional tag to group related runs (e.g. "hg19_sweep", "ablation").
             Ignored if experiment is provided explicitly.
+        :param int warmup_steps: number of linear warmup steps before cosine decay (default 0).
+        :param float min_lr: minimum learning rate at the end of cosine decay (default 0).
         '''
 
         # resolve device
@@ -249,6 +254,9 @@ class PeakModel():
         # set self
         self.radii = radii
         self.debug = debug
+        self.warmup_steps = warmup_steps
+        self.min_lr = min_lr
+
         self.model = self.create_model().to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
@@ -264,6 +272,8 @@ class PeakModel():
             device=str(self.device),
             n_params=sum(p.numel() for p in self.model.parameters()),
             num_workers=num_workers,
+            warmup_steps=warmup_steps,
+            min_lr=min_lr,
         )
 
     def save(self, checkpoint_path):
@@ -290,6 +300,8 @@ class PeakModel():
                          'shuffle_size':self.shuffle_size,
                          'prefetch_size':self.prefetch_size,
                          'radii':self.radii,
+                         'warmup_steps':self.warmup_steps,
+                         'min_lr':self.min_lr,
                          'run_id': self.experiment.run_id}
 
         with open(meta_path, 'wb') as f:
@@ -350,6 +362,31 @@ class PeakModel():
         logger.info("Starting training run_id=%s", self.experiment.run_id)
         t_start = time.monotonic()
 
+        # Build LR scheduler: optional linear warmup then cosine decay
+        if self.warmup_steps > 0 and self.warmup_steps < max_train_batches:
+            warmup = LinearLR(
+                self.optimizer,
+                start_factor=1.0 / self.warmup_steps,
+                end_factor=1.0,
+                total_iters=self.warmup_steps,
+            )
+            cosine = CosineAnnealingLR(
+                self.optimizer,
+                T_max=max_train_batches - self.warmup_steps,
+                eta_min=self.min_lr,
+            )
+            scheduler = SequentialLR(
+                self.optimizer,
+                schedulers=[warmup, cosine],
+                milestones=[self.warmup_steps],
+            )
+        else:
+            scheduler = CosineAnnealingLR(
+                self.optimizer,
+                T_max=max(max_train_batches, 1),
+                eta_min=self.min_lr,
+            )
+
         def train_step(f):
             features = [x.to(self.device) for x in f[:-2]]
             labels = f[-2].to(self.device)
@@ -369,6 +406,7 @@ class PeakModel():
 
             total_loss.backward()
             self.optimizer.step()
+            scheduler.step()
             return loss.detach()
 
         def valid_step(f):
@@ -392,8 +430,9 @@ class PeakModel():
 
             if current_batch % 1000 == 0:
                 mean_loss = loss.mean().item()
-                logger.info("batch=%d loss=%.4f", current_batch, mean_loss)
-                self.experiment.log_train_step(current_batch, mean_loss)
+                current_lr = scheduler.get_last_lr()[0]
+                logger.info("batch=%d loss=%.4f lr=%.2e", current_batch, mean_loss, current_lr)
+                self.experiment.log_train_step(current_batch, mean_loss, current_lr)
 
             if (current_batch % 200 == 0) and (self.max_valid_batches is not None):
                 # Early Stopping Validation
@@ -780,7 +819,7 @@ class EpitomeModel(PeakModel):
             dataset = EpitomeDataset(**metadata['dataset_params'])
             metadata['dataset'] = dataset
             del metadata['dataset_params']
-            metadata.pop('run_id', None)  # informational only; not a constructor param
+            metadata.pop('run_id', None)   # informational only; not a constructor param
 
             PeakModel.__init__(self, **metadata, **kwargs)
 

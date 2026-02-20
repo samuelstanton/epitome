@@ -95,9 +95,12 @@ class Experiment:
         """Record model and dataset configuration at initialisation."""
         self._write({'event': 'config', **kwargs})
 
-    def log_train_step(self, batch: int, loss: float):
-        """Record training loss at a given batch."""
-        self._write({'event': 'train_step', 'batch': batch, 'loss': round(float(loss), 6)})
+    def log_train_step(self, batch: int, loss: float, lr: float = None):
+        """Record training loss (and optionally current learning rate) at a given batch."""
+        record = {'event': 'train_step', 'batch': batch, 'loss': round(float(loss), 6)}
+        if lr is not None:
+            record['lr'] = float(lr)
+        self._write(record)
 
     def log_valid_loss(self, batch: int, loss: float):
         """Record early-stopping validation loss."""
