@@ -67,8 +67,9 @@ class Experiment:
         model = EpitomeModel(dataset, experiment=exp)
     """
 
-    def __init__(self, log_dir: str = None):
+    def __init__(self, log_dir: str = None, group: str = None):
         self.run_id = _make_run_id()
+        self.group = group
         self.log_dir = log_dir or DEFAULT_LOG_DIR
         os.makedirs(self.log_dir, exist_ok=True)
         self.log_path = os.path.join(self.log_dir, f"{self.run_id}.jsonl")
@@ -80,6 +81,8 @@ class Experiment:
 
     def _write(self, record: dict):
         record['run_id'] = self.run_id
+        if self.group is not None:
+            record['group'] = self.group
         record['ts'] = datetime.now(timezone.utc).isoformat()
         self._file.write(json.dumps(record, cls=_JsonEncoder) + '\n')
         self._file.flush()

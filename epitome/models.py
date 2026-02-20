@@ -121,7 +121,8 @@ class PeakModel():
                  max_valid_batches = None,
                  device = None,
                  num_workers = 0,
-                 experiment = None):
+                 experiment = None,
+                 group = None):
         '''
         Initializes Peak Model
 
@@ -145,6 +146,8 @@ class PeakModel():
             0 (default) loads in the main process. 2-4 typically saturates the GPU pipeline.
         :param Experiment experiment: experiment tracker. Auto-created if None.
         :type experiment: Experiment or None
+        :param str group: optional tag to group related runs (e.g. "hg19_sweep", "ablation").
+            Ignored if experiment is provided explicitly.
         '''
 
         # resolve device
@@ -157,7 +160,7 @@ class PeakModel():
                 device = torch.device("cpu")
         self.device = torch.device(device)
         self.num_workers = num_workers
-        self.experiment = experiment if experiment is not None else Experiment()
+        self.experiment = experiment if experiment is not None else Experiment(group=group)
 
         # set the dataset
         self.dataset = dataset
