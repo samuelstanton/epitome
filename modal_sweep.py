@@ -1,0 +1,223 @@
+"""
+Parallel LR sweep on Modal.
+
+Each trial runs in its own CPU container. All trials launch simultaneously
+via starmap, so a 5-point sweep takes as long as one trial.
+
+Usage
+-----
+    # dry run (print config, don't execute)
+    modal run modal_sweep.py --dry-run
+
+    # hg19 sweep with defaults
+    modal run modal_sweep.py
+
+    # custom targets / lr grid
+    modal run modal_sweep.py \\
+        --assembly hg19 \\
+        --targets CTCF,RAD21,SMC3 \\
+        --test-celltypes K562 \\
+        --lr-values "1e-4,3e-4,1e-3,3e-3,1e-2" \\
+        --max-train-batches 5000 \\
+        --group hg19_lr_sweep_v1
+"""
+
+import json
+from pathlib import Path
+from typing import Optional
+
+import modal
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+app = modal.App("epitome-tune")
+
+# Persistent volume: caches downloaded ENCODE data and experiment JSONL logs
+# between runs so we don't re-download on every sweep.
+volume = modal.Volume.from_name("epitome-cache", create_if_missing=True)
+VOLUME_PATH = "/epitome-cache"
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+
+# CPU-only torch keeps the image ~200 MB instead of ~2 GB.
+_torch = "pip install torch --index-url https://download.pytorch.org/whl/cpu"
+
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("git", "build-essential")
+    .run_commands(_torch)
+    .pip_install(
+        "numpy",
+        "pyyaml",
+        "seaborn>=0.11.2",
+        "matplotlib>=3.4.3",
+        "scikit-learn",
+        "tqdm",
+        "pyranges>=0.0.104",
+        "h5py",
+        "pandas",
+        "scipy",
+        "requests",
+    )
+    # Install epitome from source so the container picks up local changes.
+    .add_local_dir(".", remote_path="/app/epitome", ignore=["**/.venv", "**/__pycache__", "**/.git"])
+    .run_commands("pip install -e /app/epitome --no-deps --quiet")
+)
+
+# ---------------------------------------------------------------------------
+# Trial function (runs in container)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    volumes={VOLUME_PATH: volume},
+    cpu=4,
+    timeout=7200,
+)
+def run_trial(
+    lr: float,
+    assembly: str,
+    targets: list,
+    cells: Optional[list],
+    test_celltypes: list,
+    max_train_batches: int,
+    max_valid_batches: int,
+    val_every: int,
+    val_batches: int,
+    patience: int,
+    min_delta: float,
+    warmup_steps: int,
+    min_lr: float,
+    batch_size: int,
+    group: str,
+) -> dict:
+    import os
+    # Redirect ~/.epitome to the shared volume so data is cached across runs.
+    os.environ["HOME"] = VOLUME_PATH
+
+    from epitome.dataset import EpitomeDataset
+    from epitome.models import EpitomeModel
+    from epitome.tuning import _best_val_loss
+
+    dataset = EpitomeDataset(targets=targets, cells=cells or None, assembly=assembly)
+
+    model = EpitomeModel(
+        dataset,
+        test_celltypes=test_celltypes,
+        lr=lr,
+        max_valid_batches=max_valid_batches,
+        warmup_steps=warmup_steps,
+        min_lr=min_lr,
+        batch_size=batch_size,
+        group=group,
+        device="cpu",
+    )
+
+    best_batch, stopped_at, _ = model.train(
+        max_train_batches,
+        patience=patience,
+        min_delta=min_delta,
+        val_every=val_every,
+        val_batches=val_batches,
+    )
+
+    best_val = _best_val_loss(model.experiment.log_path)
+    log = open(model.experiment.log_path).read()
+    run_id = model.experiment.run_id
+    model.experiment.close()
+    volume.commit()  # persist JSONL logs to volume
+
+    return {
+        "lr": lr,
+        "best_batch": best_batch,
+        "stopped_at": stopped_at,
+        "best_val_loss": best_val,
+        "run_id": run_id,
+        "log": log,          # full JSONL returned so caller can write locally
+    }
+
+
+# ---------------------------------------------------------------------------
+# Local entrypoint
+# ---------------------------------------------------------------------------
+
+@app.local_entrypoint()
+def sweep(
+    assembly: str = "hg19",
+    targets: str = "CTCF,RAD21,SMC3",
+    cells: str = "",
+    test_celltypes: str = "K562",
+    lr_values: str = "1e-4,3e-4,1e-3,3e-3,1e-2",
+    max_train_batches: int = 5000,
+    max_valid_batches: int = 100,
+    val_every: int = 500,
+    val_batches: int = 50,
+    patience: int = 5,
+    min_delta: float = 0.001,
+    warmup_steps: int = 200,
+    min_lr: float = 0.0,
+    batch_size: int = 64,
+    group: str = "",
+    dry_run: bool = False,
+):
+    from epitome.experiment import _make_run_id
+
+    parsed_lr      = [float(x.strip()) for x in lr_values.split(",")]
+    parsed_targets = [x.strip() for x in targets.split(",")]
+    parsed_cells   = [x.strip() for x in cells.split(",")] if cells else []
+    parsed_test    = [x.strip() for x in test_celltypes.split(",")]
+    sweep_group    = group or f"modal_tune_{_make_run_id()}"
+
+    print(f"group         : {sweep_group}")
+    print(f"assembly      : {assembly}")
+    print(f"targets       : {parsed_targets}")
+    print(f"test_celltypes: {parsed_test}")
+    print(f"lr_values     : {parsed_lr}")
+    print(f"max_train_batches: {max_train_batches}  warmup_steps: {warmup_steps}")
+
+    if dry_run:
+        print("\n[dry run] exiting without submitting jobs")
+        return
+
+    # Build argument tuples — one per lr value; all launched in parallel.
+    args = [
+        (lr, assembly, parsed_targets, parsed_cells, parsed_test,
+         max_train_batches, max_valid_batches, val_every, val_batches,
+         patience, min_delta, warmup_steps, min_lr, batch_size, sweep_group)
+        for lr in parsed_lr
+    ]
+
+    print(f"\nLaunching {len(args)} trials in parallel…")
+    results = list(run_trial.starmap(args))
+    results.sort(key=lambda r: r["best_val_loss"])
+
+    # Write JSONL logs locally under ~/.epitome/experiments/
+    from pathlib import Path
+    log_dir = Path.home() / ".epitome" / "experiments"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    for r in results:
+        (log_dir / f"{r['run_id']}.jsonl").write_text(r["log"])
+
+    # Print summary table
+    print(f"\n── Sweep results ({sweep_group}) ──────────────────────────")
+    print(f"{'rank':<6}{'lr':<12}{'best_val_loss':<16}{'stopped_at':<14}best_batch")
+    for i, r in enumerate(results):
+        print(f"{i:<6}{r['lr']:<12.0e}{r['best_val_loss']:<16.4f}{r['stopped_at']:<14}{r['best_batch']}")
+
+    best = results[0]
+    print(f"\nBest: lr={best['lr']:.0e}  run_id={best['run_id']}")
+    print(f"Retrain: model.train({best['stopped_at']})")
+
+    # Save summary JSON locally
+    summary = {
+        "group": sweep_group,
+        "best": {k: v for k, v in best.items() if k != "log"},
+        "results": [{k: v for k, v in r.items() if k != "log"} for r in results],
+    }
+    summary_path = Path(f"sweep_{sweep_group}.json")
+    summary_path.write_text(json.dumps(summary, indent=2))
+    print(f"Summary → {summary_path}")
