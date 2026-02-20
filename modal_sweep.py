@@ -43,8 +43,8 @@ VOLUME_PATH = "/epitome-cache"
 # Image
 # ---------------------------------------------------------------------------
 
-# CPU-only torch keeps the image ~200 MB instead of ~2 GB.
-_torch = "pip install torch --index-url https://download.pytorch.org/whl/cpu"
+# CUDA torch for T4 GPU.
+_torch = "pip install torch --index-url https://download.pytorch.org/whl/cu124"
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -75,7 +75,7 @@ image = (
 @app.function(
     image=image,
     volumes={VOLUME_PATH: volume},
-    cpu=4,
+    gpu="T4",
     timeout=7200,
 )
 def run_trial(
@@ -118,7 +118,7 @@ def run_trial(
         min_lr=min_lr,
         batch_size=batch_size,
         group=group,
-        device="cpu",
+        num_workers=4,
     )
 
     best_batch, stopped_at, _ = model.train(
@@ -181,7 +181,7 @@ def sweep(
     min_delta: float = 0.001,
     warmup_steps: int = 200,
     min_lr: float = 0.0,
-    batch_size: int = 64,
+    batch_size: int = 1024,
     group: str = "",
     dry_run: bool = False,
 ):
