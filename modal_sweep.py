@@ -165,7 +165,69 @@ def run_trial(
 
 
 # ---------------------------------------------------------------------------
-# Local entrypoint
+# Sweep orchestrator — runs on Modal so it survives laptop disconnection
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    volumes={VOLUME_PATH: volume},
+    timeout=86400,  # 24 hours
+)
+def run_sweep(
+    parsed_lr: list,
+    assembly: str,
+    parsed_targets: list,
+    parsed_cells: list,
+    parsed_test: list,
+    max_train_batches: int,
+    max_valid_batches: int,
+    val_every: int,
+    val_batches: int,
+    test_batches: int,
+    patience: int,
+    min_delta: float,
+    warmup_steps: int,
+    min_lr: float,
+    batch_size: int,
+    sweep_group: str,
+    similarity_kernel: str,
+) -> dict:
+    from pathlib import Path
+
+    args = [
+        (lr, assembly, parsed_targets, parsed_cells, parsed_test,
+         max_train_batches, max_valid_batches, val_every, val_batches,
+         test_batches, patience, min_delta, warmup_steps, min_lr, batch_size,
+         sweep_group, similarity_kernel)
+        for lr in parsed_lr
+    ]
+
+    print(f"Launching {len(args)} trials in parallel…")
+    results = list(run_trial.starmap(args))
+    results.sort(key=lambda r: r["best_val_loss"])
+
+    # Write JSONL logs to volume
+    log_dir = Path(VOLUME_PATH) / "experiments"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    for r in results:
+        (log_dir / f"{r['run_id']}.jsonl").write_text(r["log"])
+
+    # Save summary JSON to volume
+    summary = {
+        "group": sweep_group,
+        "best": {k: v for k, v in results[0].items() if k != "log"},
+        "results": [{k: v for k, v in r.items() if k != "log"} for r in results],
+    }
+    summary_path = Path(VOLUME_PATH) / "sweeps" / f"{sweep_group}.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, indent=2))
+    volume.commit()
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Local entrypoint — thin launcher, safe to disconnect after submission
 # ---------------------------------------------------------------------------
 
 @app.local_entrypoint()
@@ -209,27 +271,16 @@ def sweep(
         print("\n[dry run] exiting without submitting jobs")
         return
 
-    # Build argument tuples — one per lr value; all launched in parallel.
-    args = [
-        (lr, assembly, parsed_targets, parsed_cells, parsed_test,
-         max_train_batches, max_valid_batches, val_every, val_batches,
-         test_batches, patience, min_delta, warmup_steps, min_lr, batch_size, sweep_group,
-         similarity_kernel)
-        for lr in parsed_lr
-    ]
-
-    print(f"\nLaunching {len(args)} trials in parallel…")
-    results = list(run_trial.starmap(args))
-    results.sort(key=lambda r: r["best_val_loss"])
-
-    # Write JSONL logs locally under ~/.epitome/experiments/
-    from pathlib import Path
-    log_dir = Path.home() / ".epitome" / "experiments"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    for r in results:
-        (log_dir / f"{r['run_id']}.jsonl").write_text(r["log"])
+    # run_sweep executes on Modal — safe to close laptop after this returns
+    summary = run_sweep.remote(
+        parsed_lr, assembly, parsed_targets, parsed_cells, parsed_test,
+        max_train_batches, max_valid_batches, val_every, val_batches,
+        test_batches, patience, min_delta, warmup_steps, min_lr, batch_size,
+        sweep_group, similarity_kernel,
+    )
 
     # Print summary table
+    results = summary["results"]
     print(f"\n── Sweep results ({sweep_group}) ──────────────────────────────────────────")
     print(f"{'rank':<6}{'lr':<10}{'val_loss':<14}{'test_auROC':<14}{'test_auPRC':<14}{'stopped_at':<13}best_batch")
     for i, r in enumerate(results):
@@ -237,17 +288,8 @@ def sweep(
         auprc = f"{r['test_auPRC']:.4f}" if r['test_auPRC'] is not None else "n/a"
         print(f"{i:<6}{r['lr']:<10.0e}{r['best_val_loss']:<14.4f}{auroc:<14}{auprc:<14}{r['stopped_at']:<13}{r['best_batch']}")
 
-    best = results[0]
+    best = summary["best"]
     print(f"\nBest: lr={best['lr']:.0e}  run_id={best['run_id']}")
     print(f"Checkpoint: {best['checkpoint_path']}")
     print(f"Retrain:    model.train({best['stopped_at']})")
-
-    # Save summary JSON locally
-    summary = {
-        "group": sweep_group,
-        "best": {k: v for k, v in best.items() if k != "log"},
-        "results": [{k: v for k, v in r.items() if k != "log"} for r in results],
-    }
-    summary_path = Path(f"sweep_{sweep_group}.json")
-    summary_path.write_text(json.dumps(summary, indent=2))
-    print(f"Summary → {summary_path}")
+    print(f"Summary on volume: {VOLUME_PATH}/sweeps/{sweep_group}.json")
