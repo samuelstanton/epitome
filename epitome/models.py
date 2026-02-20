@@ -21,7 +21,7 @@ import pandas as pd
 
 from .functions import *
 from .constants import Dataset, Label
-from .generators import generator_to_tf_dataset, load_data
+from .generators import build_dataloader, load_data
 from .dataset import EpitomeDataset
 from .metrics import *
 from .conversion import *
@@ -179,7 +179,7 @@ class PeakModel():
             print(self.dataset.get_data(Dataset.TRAIN_VALID).shape)
 
             # Creating a separate train-validation dataset
-            _, _, self.train_valid_iter = generator_to_tf_dataset(load_data(self.dataset.get_data(Dataset.TRAIN_VALID),
+            _, _, self.train_valid_iter = build_dataloader(load_data(self.dataset.get_data(Dataset.TRAIN_VALID),
                                                     self.eval_cell_types,
                                                     self.eval_cell_types,
                                                     dataset.matrix,
@@ -190,7 +190,7 @@ class PeakModel():
                                                     radii = radii, mode = Dataset.TRAIN),
                                                     batch_size, shuffle_size, prefetch_size, self.num_workers)
 
-        input_shapes, output_shape, self.train_iter = generator_to_tf_dataset(load_data(self.dataset.get_data(Dataset.TRAIN),
+        input_shapes, output_shape, self.train_iter = build_dataloader(load_data(self.dataset.get_data(Dataset.TRAIN),
                                                 self.eval_cell_types,
                                                 self.eval_cell_types,
                                                 dataset.matrix,
@@ -201,7 +201,7 @@ class PeakModel():
                                                 radii = radii, mode = Dataset.TRAIN),
                                                 batch_size, shuffle_size, prefetch_size)
 
-        _, _,            self.valid_iter = generator_to_tf_dataset(load_data(self.dataset.get_data(Dataset.VALID),
+        _, _,            self.valid_iter = build_dataloader(load_data(self.dataset.get_data(Dataset.VALID),
                                                 self.eval_cell_types,
                                                 self.eval_cell_types,
                                                 dataset.matrix,
@@ -214,7 +214,7 @@ class PeakModel():
 
         # can be empty if len(test_celltypes) == 0
         if len(self.test_celltypes) > 0:
-            _, _,            self.test_iter = generator_to_tf_dataset(load_data(self.dataset.get_data(Dataset.TEST),
+            _, _,            self.test_iter = build_dataloader(load_data(self.dataset.get_data(Dataset.TEST),
                                                    self.test_celltypes,
                                                    self.eval_cell_types,
                                                    dataset.matrix,
@@ -423,7 +423,7 @@ class PeakModel():
         Runs test given a specified data generator.
 
         :param int num_samples: number of samples to test
-        :param DataLoader ds: DataLoader, created by generator_to_tf_dataset
+        :param DataLoader ds: DataLoader, created by build_dataloader
         :param bool calculate_metrics: whether to return auROC/auPR
         :return: predictions
         :rtype: dict
@@ -457,7 +457,7 @@ class PeakModel():
         nonzero_indices = np.where(region_sums > 0)[0]
         filtered_indices = indices[nonzero_indices]
 
-        input_shapes, output_shape, ds = generator_to_tf_dataset(load_data(self.dataset.get_data(Dataset.ALL),
+        input_shapes, output_shape, ds = build_dataloader(load_data(self.dataset.get_data(Dataset.ALL),
                  self.test_celltypes,   # used for labels. Should be all for train/eval and subset for test
                  self.eval_cell_types,   # used for rotating features. Should be all - test for train/eval
                  self.dataset.matrix,
@@ -519,7 +519,7 @@ class PeakModel():
         Runs predictions on num_samples records
 
         :param int num_samples: number of samples to test
-        :param DataLoader iter_: DataLoader from generator_to_tf_dataset
+        :param DataLoader iter_: DataLoader from build_dataloader
         :param bool calculate_metrics: whether to return auROC/auPR
 
         :return: dict of preds, truth, target_dict, auROC, auPRC, False

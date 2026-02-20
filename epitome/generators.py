@@ -8,7 +8,7 @@ Data Generator Functions
   :toctree: _generate/
 
   load_data
-  generator_to_tf_dataset
+  build_dataloader
 """
 
 import numpy as np
@@ -294,7 +294,7 @@ def load_data(data,
     return g
 
 
-def generator_to_tf_dataset(g, batch_size, shuffle_size, prefetch_size, num_workers=0):
+def build_dataloader(g, batch_size, shuffle_size, prefetch_size, num_workers=0):
     """
     Creates a PyTorch DataLoader from a data generator.
 
