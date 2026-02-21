@@ -203,7 +203,7 @@ def run_sweep(
     ]
 
     print(f"Launching {len(args)} trials in parallel…")
-    raw = list(run_trial.starmap(args, return_exceptions=True))
+    raw = list(run_trial.starmap(args, return_exceptions=True, wrap_returned_exceptions=False))
 
     results, failures = [], []
     for arg, outcome in zip(args, raw):
