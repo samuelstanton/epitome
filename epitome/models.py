@@ -206,7 +206,8 @@ class PeakModel():
                                                     dataset.cellmap,
                                                     continuous = self.single_cell,
                                                     similarity_targets= dataset.similarity_targets,
-                                                    radii = radii, mode = Dataset.TRAIN),
+                                                    similarity_kernel = self.similarity_kernel,
+                                                    radii = radii, mode = Dataset.VALID),
                                                     batch_size, shuffle_size, prefetch_size, self.num_workers)
 
         input_shapes, output_shape, self.train_iter = build_dataloader(load_data(self.dataset.get_data(Dataset.TRAIN),

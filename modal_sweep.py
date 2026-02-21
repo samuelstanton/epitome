@@ -203,7 +203,19 @@ def run_sweep(
     ]
 
     print(f"Launching {len(args)} trials in parallel…")
-    results = list(run_trial.starmap(args))
+    raw = list(run_trial.starmap(args, return_exceptions=True))
+
+    results, failures = [], []
+    for arg, outcome in zip(args, raw):
+        if isinstance(outcome, Exception):
+            failures.append({"lr": arg[0], "error": str(outcome)})
+            print(f"  FAILED lr={arg[0]:.0e}: {outcome}")
+        else:
+            results.append(outcome)
+
+    if not results:
+        raise RuntimeError("All trials failed: " + str(failures))
+
     results.sort(key=lambda r: r["best_val_loss"])
 
     # Write JSONL logs to volume

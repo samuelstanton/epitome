@@ -250,7 +250,8 @@ def load_data(data,
                         for p_arr, u_arr in zip(pos_arrays, union_arrays):
                             num = np.average(p_arr, axis=-1)
                             den = np.average(u_arr, axis=-1)
-                            jaccard_arrays.append(np.where(den > 0, num / den, 0.0))
+                            with np.errstate(invalid='ignore', divide='ignore'):
+                                jaccard_arrays.append(np.where(den > 0, num / den, 0.0))
                         similarities = np.stack(jaccard_arrays, axis=1)
                     elif not continuous:
                         agree_arrays = np.split(agree, split_indices, axis = -1)
