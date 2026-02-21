@@ -1,113 +1,95 @@
-[![pypi](https://img.shields.io/pypi/v/epitome.svg)](https://pypi.org/project/epitome/)
-[![docs](https://readthedocs.org/projects/epitome/badge/?version=latest)](https://epitome.readthedocs.io/en/latest/)
-![Build status](https://github.com/YosefLab/epitome/workflows/epitome/badge.svg)
-[![Codacy Badge](https://api.codacy.com/project/badge/Grade/6c2cef0a2eae45399c9caed2d8c81965)](https://app.codacy.com/gh/YosefLab/epitome?utm_source=github.com&utm_medium=referral&utm_content=YosefLab/epitome&utm_campaign=Badge_Grade)
-
-
 # Epitome
 
-Pipeline for predicting ChIP-seq peaks in novel cell types using chromatin accessibility.
+Predicts ChIP-seq peaks (transcription factor binding, histone modifications) in novel cell types from chromatin accessibility (DNase-seq or ATAC-seq).
 
-![Epitome Diagram](https://github.com/YosefLab/epitome/raw/master/docs/figures/epitome_diagram_celllines.png)
+This is a fork of [YosefLab/epitome](https://github.com/YosefLab/epitome) ported to PyTorch and modernised for Python 3.9+. The core method is unchanged — see the original repo and [Morrow et al., NAR 2021](https://doi.org/10.1093/nar/gkab676) for details.
 
-Epitome leverages chromatin accessibility (either DNase-seq or ATAC-seq) to predict epigenetic events in a novel cell type of interest. Such epigenetic events include transcription factor binding sites and histone modifications. Epitome computes chromatin accessibility similarity between ENCODE cell types and the novel cell type, and uses this information to transfer known epigentic signal to the novel cell type of interest.
+## Installation
 
-# Citation
+Requires [uv](https://docs.astral.sh/uv/).
 
-[Morrow et al., NAR, Volume 49, Issue 19, 8 November 2021, Page e110](https://doi.org/10.1093/nar/gkab676)
-
-# Documentation
-
-Epitome documentation is hosted at [readthedocs](https://epitome.readthedocs.io/en/latest/). Documentation for Epitome includes tutorials for creating Epitome datasets, training, testing, and evaluated models.
-
-
-## Requirements
-* [conda](https://docs.conda.io/en/latest/miniconda.html)
-* python >= 3.7
-
-## Setup and Installation
-1. Create and activate a conda environment:
-```
-conda create --name EpitomeEnv python=3.7 pip
-source activate EpitomeEnv
-```
-2. Install Epitome:
-```
-pip install epitome
+```bash
+git clone https://github.com/samuelstanton/epitome
+cd epitome
+uv sync --dev
 ```
 
-
-## Training a Model
-
-First, create an Epitome dataset that defines the cell types and ChIP-seq
-targets you want to train on,
-
+## Quick start
 
 ```python
+from epitome.dataset import EpitomeDataset
+from epitome.models import EpitomeModel
 
-    from epitome.dataset import *
+# Define targets and training cell types
+dataset = EpitomeDataset(
+    targets=['CTCF', 'RAD21', 'SMC3'],
+    cells=['K562', 'A549', 'GM12878'],
+)
 
-    targets = ['CTCF','RAD21','SMC3']
-    celltypes = ['K562', 'A549', 'GM12878']
+# Train (device auto-selected: MPS > CUDA > CPU)
+model = EpitomeModel(dataset, test_celltypes=['K562'])
+model.train(5000, val_every=500)   # logs val loss to ~/.epitome/experiments/
 
-    dataset = EpitomeDataset(targets=targets, cells=celltypes)
-
+# Evaluate on held-out test chromosomes
+results = model.test(1000, calculate_metrics=True)
+print(results['auROC'], results['auPRC'])
 ```
 
-Now, you can create and train your model:
+## Scoring new samples
 
 ```python
+# Score specific genomic regions
+results = model.score_peak_file(
+    ['/path/to/atac.bed'],      # chromatin accessibility peaks
+    '/path/to/regions.bed',     # regions to score
+)
 
-    from epitome.models import *
-
-    model = EpitomeModel(dataset, test_celltypes = ["K562"])
-    model.train(5000) # train for 5000 batches
+# Whole-genome scan
+model.score_whole_genome(['/path/to/atac.bed'], 'output_prefix')
 ```
 
-## Evaluate a Model:
+## Hyperparameter tuning
+
+Local sweep (uses early stopping to find optimal step count):
 
 ```python
+from epitome.tuning import tune
 
-   model.test(1000) # evaluate how well the model performs on a validation chromosome
-
+results = tune(dataset, lr_values=[1e-4, 1e-3, 1e-2], max_train_batches=5000)
+best = results[0]  # sorted by val loss
+print(f"Best lr={best['lr']:.0e}, retrain with model.train({best['stopped_at']})")
 ```
 
-## Using Epitome on your own dataset:
+Parallel sweep on Modal (survives laptop disconnect):
 
-Epitome can perform genome wide predictions or region specific predictions on
-a sample that has either DNase-seq or ATAC-seq.
-
-To score specific regions:
-
-```python
-
-   chromatin_peak_file = ... # path to peak called ATAC-seq or DNase-seq in bed format
-   regions_file = ...        # path to bed file of regions to score
-   results = model.score_peak_file([chromatin_peak_file], regions_file)
-
+```bash
+# install modal first: uv add modal --dev && modal setup
+modal run --detach modal_sweep.py \
+    --targets CTCF,RAD21,SMC3 \
+    --lr-values "1e-3,1e-2,4e-2" \
+    --max-train-batches 10000 \
+    --group my_sweep
 ```
 
-To score on the whole genome:
+Results land at `~/.epitome/sweeps/<group>.json` (local) or on the `epitome-cache` Modal volume.
 
-```python
+## Key options
 
-   chromatin_peak_file = ... # path to peak called ATAC-seq or DNase-seq in bed format
-   file_prefix = ...        # file to save compressed numpy predictions to.
-   model.score_whole_genome([chromatin_peak_file], file_prefix)
+| Parameter | Default | Description |
+|---|---|---|
+| `lr` | `1e-3` | Peak learning rate |
+| `warmup_steps` | `0` | Linear LR warmup before cosine decay |
+| `min_lr` | `0.` | Cosine decay floor |
+| `device` | auto | `"cpu"`, `"cuda"`, or `"mps"` |
+| `similarity_kernel` | `"dot_agree"` | `"dot_agree"` or `"jaccard"` |
+| `group` | `None` | Tag for grouping experiment logs |
 
-```
+## Experiment logging
 
+Every run writes a JSONL file to `~/.epitome/experiments/<timestamp>_<hash>.jsonl` with `config`, `train_step`, `val_loss`, `train_complete`, and `eval` records. Use the `group` parameter to tag related runs for easy querying.
 
-# Install Epitome for development
+## Tests
 
-To build Epitome for development, run:
-
-```
-make develop
-```
-
-## Running unit tests
-
-```
-make test
+```bash
+uv run pytest epitome/test/
 ```
